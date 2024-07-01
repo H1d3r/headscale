@@ -17,6 +17,7 @@ import (
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/juanfont/headscale/hscontrol/db"
+	"github.com/juanfont/headscale/hscontrol/notifier"
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
@@ -51,10 +52,10 @@ var debugDumpMapResponsePath = envknob.String("HEADSCALE_DEBUG_DUMP_MAPRESPONSE_
 type Mapper struct {
 	// Configuration
 	// TODO(kradalby): figure out if this is the format we want this in
-	db                *db.HSDatabase
-	cfg               *types.Config
-	derpMap           *tailcfg.DERPMap
-	isLikelyConnected types.NodeConnectedMap
+	db      *db.HSDatabase
+	cfg     *types.Config
+	derpMap *tailcfg.DERPMap
+	notif   *notifier.Notifier
 
 	uid     string
 	created time.Time
@@ -70,15 +71,15 @@ func NewMapper(
 	db *db.HSDatabase,
 	cfg *types.Config,
 	derpMap *tailcfg.DERPMap,
-	isLikelyConnected types.NodeConnectedMap,
+	notif *notifier.Notifier,
 ) *Mapper {
 	uid, _ := util.GenerateRandomStringDNSSafe(mapperIDLength)
 
 	return &Mapper{
-		db:                db,
-		cfg:               cfg,
-		derpMap:           derpMap,
-		isLikelyConnected: isLikelyConnected,
+		db:      db,
+		cfg:     cfg,
+		derpMap: derpMap,
+		notif:   notif,
 
 		uid:     uid,
 		created: time.Now(),
@@ -101,7 +102,7 @@ func generateUserProfiles(
 		userMap[peer.User.Name] = peer.User // not worth checking if already is there
 	}
 
-	profiles := []tailcfg.UserProfile{}
+	var profiles []tailcfg.UserProfile
 	for _, user := range userMap {
 		displayName := user.Name
 
@@ -121,37 +122,41 @@ func generateUserProfiles(
 }
 
 func generateDNSConfig(
-	base *tailcfg.DNSConfig,
+	cfg *types.Config,
 	baseDomain string,
 	node *types.Node,
 	peers types.Nodes,
 ) *tailcfg.DNSConfig {
-	dnsConfig := base.Clone()
+	if cfg.DNSConfig == nil {
+		return nil
+	}
+
+	dnsConfig := cfg.DNSConfig.Clone()
 
 	// if MagicDNS is enabled
-	if base != nil && base.Proxied {
-		// Only inject the Search Domain of the current user
-		// shared nodes should use their full FQDN
-		dnsConfig.Domains = append(
-			dnsConfig.Domains,
-			fmt.Sprintf(
-				"%s.%s",
-				node.User.Name,
-				baseDomain,
-			),
-		)
+	if dnsConfig.Proxied {
+		if cfg.DNSUserNameInMagicDNS {
+			// Only inject the Search Domain of the current user
+			// shared nodes should use their full FQDN
+			dnsConfig.Domains = append(
+				dnsConfig.Domains,
+				fmt.Sprintf(
+					"%s.%s",
+					node.User.Name,
+					baseDomain,
+				),
+			)
 
-		userSet := mapset.NewSet[types.User]()
-		userSet.Add(node.User)
-		for _, p := range peers {
-			userSet.Add(p.User)
+			userSet := mapset.NewSet[types.User]()
+			userSet.Add(node.User)
+			for _, p := range peers {
+				userSet.Add(p.User)
+			}
+			for _, user := range userSet.ToSlice() {
+				dnsRoute := fmt.Sprintf("%v.%v", user.Name, baseDomain)
+				dnsConfig.Routes[dnsRoute] = nil
+			}
 		}
-		for _, user := range userSet.ToSlice() {
-			dnsRoute := fmt.Sprintf("%v.%v", user.Name, baseDomain)
-			dnsConfig.Routes[dnsRoute] = nil
-		}
-	} else {
-		dnsConfig = base
 	}
 
 	addNextDNSMetadata(dnsConfig.Resolvers, node)
@@ -517,7 +522,7 @@ func (m *Mapper) ListPeers(nodeID types.NodeID) (types.Nodes, error) {
 	}
 
 	for _, peer := range peers {
-		online := m.isLikelyConnected[peer.ID]
+		online := m.notif.IsLikelyConnected(peer.ID)
 		peer.IsOnline = &online
 	}
 
@@ -567,7 +572,7 @@ func appendPeerChanges(
 	profiles := generateUserProfiles(node, changed, cfg.BaseDomain)
 
 	dnsConfig := generateDNSConfig(
-		cfg.DNSConfig,
+		cfg,
 		cfg.BaseDomain,
 		node,
 		peers,

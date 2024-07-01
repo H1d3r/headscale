@@ -10,6 +10,7 @@ import (
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/patrickmn/go-cache"
+	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
@@ -214,7 +215,7 @@ func SetTags(
 		return nil
 	}
 
-	newTags := types.StringList{}
+	var newTags types.StringList
 	for _, tag := range tags {
 		if !util.StringOrPrefixListContains(newTags, tag) {
 			newTags = append(newTags, tag)
@@ -260,9 +261,9 @@ func NodeSetExpiry(tx *gorm.DB,
 	return tx.Model(&types.Node{}).Where("id = ?", nodeID).Update("expiry", expiry).Error
 }
 
-func (hsdb *HSDatabase) DeleteNode(node *types.Node, isConnected types.NodeConnectedMap) ([]types.NodeID, error) {
+func (hsdb *HSDatabase) DeleteNode(node *types.Node, isLikelyConnected *xsync.MapOf[types.NodeID, bool]) ([]types.NodeID, error) {
 	return Write(hsdb.DB, func(tx *gorm.DB) ([]types.NodeID, error) {
-		return DeleteNode(tx, node, isConnected)
+		return DeleteNode(tx, node, isLikelyConnected)
 	})
 }
 
@@ -270,15 +271,15 @@ func (hsdb *HSDatabase) DeleteNode(node *types.Node, isConnected types.NodeConne
 // Caller is responsible for notifying all of change.
 func DeleteNode(tx *gorm.DB,
 	node *types.Node,
-	isConnected types.NodeConnectedMap,
+	isLikelyConnected *xsync.MapOf[types.NodeID, bool],
 ) ([]types.NodeID, error) {
-	changed, err := deleteNodeRoutes(tx, node, isConnected)
+	changed, err := deleteNodeRoutes(tx, node, isLikelyConnected)
 	if err != nil {
 		return changed, err
 	}
 
 	// Unscoped causes the node to be fully removed from the database.
-	if err := tx.Unscoped().Delete(&node).Error; err != nil {
+	if err := tx.Unscoped().Delete(&types.Node{}, node.ID).Error; err != nil {
 		return changed, err
 	}
 
@@ -451,7 +452,7 @@ func GetAdvertisedRoutes(tx *gorm.DB, node *types.Node) ([]netip.Prefix, error) 
 		return nil, fmt.Errorf("getting advertised routes for node(%d): %w", node.ID, err)
 	}
 
-	prefixes := []netip.Prefix{}
+	var prefixes []netip.Prefix
 	for _, route := range routes {
 		prefixes = append(prefixes, netip.Prefix(route.Prefix))
 	}
@@ -477,7 +478,7 @@ func GetEnabledRoutes(tx *gorm.DB, node *types.Node) ([]netip.Prefix, error) {
 		return nil, fmt.Errorf("getting enabled routes for node(%d): %w", node.ID, err)
 	}
 
-	prefixes := []netip.Prefix{}
+	var prefixes []netip.Prefix
 	for _, route := range routes {
 		prefixes = append(prefixes, netip.Prefix(route.Prefix))
 	}
@@ -660,7 +661,7 @@ func GenerateGivenName(
 }
 
 func DeleteExpiredEphemeralNodes(tx *gorm.DB,
-	inactivityThreshhold time.Duration,
+	inactivityThreshold time.Duration,
 ) ([]types.NodeID, []types.NodeID) {
 	users, err := ListUsers(tx)
 	if err != nil {
@@ -678,7 +679,7 @@ func DeleteExpiredEphemeralNodes(tx *gorm.DB,
 		for idx, node := range nodes {
 			if node.IsEphemeral() && node.LastSeen != nil &&
 				time.Now().
-					After(node.LastSeen.Add(inactivityThreshhold)) {
+					After(node.LastSeen.Add(inactivityThreshold)) {
 				expired = append(expired, node.ID)
 
 				log.Info().

@@ -51,12 +51,10 @@ func initConfig() {
 
 	cfg, err := types.GetHeadscaleConfig()
 	if err != nil {
-		log.Fatal().Caller().Err(err).Msg("Failed to get headscale configuration")
+		log.Fatal().Err(err).Msg("Failed to read headscale configuration")
 	}
 
 	machineOutput := HasMachineOutputFlag()
-
-	zerolog.SetGlobalLevel(cfg.Log.Level)
 
 	// If the user has requested a "node" readable format,
 	// then disable login so the output remains valid.

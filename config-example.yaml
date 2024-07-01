@@ -105,7 +105,7 @@ derp:
     automatically_add_embedded_derp_region: true
 
     # For better connection stability (especially when using an Exit-Node and DNS is not working),
-    # it is possible to optionall add the public IPv4 and IPv6 address to the Derp-Map using:
+    # it is possible to optionally add the public IPv4 and IPv6 address to the Derp-Map using:
     ipv4: 1.2.3.4
     ipv6: 2001:db8::1
 
@@ -143,6 +143,10 @@ database:
   # SQLite config
   sqlite:
     path: /var/lib/headscale/db.sqlite
+
+    # Enable WAL mode for SQLite. This is recommended for production environments.
+    # https://www.sqlite.org/wal.html
+    write_ahead_log: true
 
   # # Postgres config
   # postgres:
@@ -199,7 +203,7 @@ log:
   format: text
   level: info
 
-# Path to a file containg ACL policies.
+# Path to a file containing ACL policies.
 # ACLs can be defined as YAML or HUJSON.
 # https://tailscale.com/kb/1018/acls/
 acl_policy_path: ""
@@ -260,6 +264,15 @@ dns_config:
   # Whether to use [MagicDNS](https://tailscale.com/kb/1081/magicdns/).
   # Only works if there is at least a nameserver defined.
   magic_dns: true
+
+  # DEPRECATED
+  # Use the username as part of the DNS name for nodes, with this option enabled:
+  # node1.username.example.com
+  # while when this is disabled:
+  # node1.example.com
+  # This is a legacy option as Headscale has have this wrongly implemented
+  # while in upstream Tailscale, the username is not included.
+  use_username_in_magic_dns: false
 
   # Defines the base domain to create the hostnames for MagicDNS.
   # `base_domain` must be a FQDNs, without the trailing dot.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	v1 "github.com/juanfont/headscale/gen/go/headscale/v1"
 	"github.com/juanfont/headscale/hscontrol/util"
@@ -50,8 +51,11 @@ var (
 	tailscaleVersions2021 = map[string]bool{
 		"head":     true,
 		"unstable": true,
-		"1.60":     true,  // CapVer: 82
-		"1.58":     true,  // CapVer: 82
+		"1.66":     true,  // CapVer: not checked
+		"1.64":     true,  // CapVer: not checked
+		"1.62":     true,  // CapVer: not checked
+		"1.60":     true,  // CapVer: not checked
+		"1.58":     true,  // CapVer: not checked
 		"1.56":     true,  // CapVer: 82
 		"1.54":     true,  // CapVer: 79
 		"1.52":     true,  // CapVer: 79
@@ -141,7 +145,7 @@ type Scenario struct {
 
 // NewScenario creates a test Scenario which can be used to bootstraps a ControlServer with
 // a set of Users and TailscaleClients.
-func NewScenario() (*Scenario, error) {
+func NewScenario(maxWait time.Duration) (*Scenario, error) {
 	hash, err := util.GenerateRandomStringDNSSafe(scenarioHashLength)
 	if err != nil {
 		return nil, err
@@ -152,7 +156,7 @@ func NewScenario() (*Scenario, error) {
 		return nil, fmt.Errorf("could not connect to docker: %w", err)
 	}
 
-	pool.MaxWait = dockertestMaxWait()
+	pool.MaxWait = maxWait
 
 	networkName := fmt.Sprintf("hs-%s", hash)
 	if overrideNetworkName := os.Getenv("HEADSCALE_TEST_NETWORK_NAME"); overrideNetworkName != "" {
@@ -422,8 +426,10 @@ func (s *Scenario) WaitForTailscaleSync() error {
 	if err != nil {
 		for _, user := range s.users {
 			for _, client := range user.Clients {
-				peers, _ := client.PrettyPeers()
-				log.Println(peers)
+				peers, allOnline, _ := client.FailingPeersAsString()
+				if !allOnline {
+					log.Println(peers)
+				}
 			}
 		}
 	}
@@ -449,7 +455,7 @@ func (s *Scenario) WaitForTailscaleSyncWithPeerCount(peerCount int) error {
 	return nil
 }
 
-// CreateHeadscaleEnv is a conventient method returning a complete Headcale
+// CreateHeadscaleEnv is a convenient method returning a complete Headcale
 // test environment with nodes of all versions, joined to the server with X
 // users.
 func (s *Scenario) CreateHeadscaleEnv(
@@ -510,7 +516,7 @@ func (s *Scenario) GetIPs(user string) ([]netip.Addr, error) {
 	return ips, fmt.Errorf("failed to get ips: %w", errNoUserAvailable)
 }
 
-// GetIPs returns all TailscaleClients associated with a User in a Scenario.
+// GetClients returns all TailscaleClients associated with a User in a Scenario.
 func (s *Scenario) GetClients(user string) ([]TailscaleClient, error) {
 	var clients []TailscaleClient
 	if ns, ok := s.users[user]; ok {
@@ -586,7 +592,7 @@ func (s *Scenario) ListTailscaleClientsIPs(users ...string) ([]netip.Addr, error
 	return allIps, nil
 }
 
-// ListTailscaleClientsIPs returns a list of FQDN based on Users
+// ListTailscaleClientsFQDNs returns a list of FQDN based on Users
 // passed as parameters.
 func (s *Scenario) ListTailscaleClientsFQDNs(users ...string) ([]string, error) {
 	allFQDNs := make([]string, 0)

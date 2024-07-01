@@ -63,7 +63,8 @@ type Config struct {
 	ACMEURL   string
 	ACMEEmail string
 
-	DNSConfig *tailcfg.DNSConfig
+	DNSConfig             *tailcfg.DNSConfig
+	DNSUserNameInMagicDNS bool
 
 	UnixSocket           string
 	UnixSocketPermission fs.FileMode
@@ -81,7 +82,8 @@ type Config struct {
 }
 
 type SqliteConfig struct {
-	Path string
+	Path          string
+	WriteAheadLog bool
 }
 
 type PostgresConfig struct {
@@ -171,6 +173,7 @@ type LogConfig struct {
 }
 
 type Tuning struct {
+	NotifierSendTimeout            time.Duration
 	BatchChangeDelay               time.Duration
 	NodeMapSessionBufferedChanSize int
 }
@@ -202,6 +205,7 @@ func LoadConfig(path string, isFile bool) error {
 
 	viper.SetDefault("dns_config", nil)
 	viper.SetDefault("dns_config.override_local_dns", true)
+	viper.SetDefault("dns_config.use_username_in_magic_dns", false)
 
 	viper.SetDefault("derp.server.enabled", false)
 	viper.SetDefault("derp.server.stun.enabled", true)
@@ -221,6 +225,8 @@ func LoadConfig(path string, isFile bool) error {
 	viper.SetDefault("database.postgres.max_idle_conns", 10)
 	viper.SetDefault("database.postgres.conn_max_idle_time_secs", 3600)
 
+	viper.SetDefault("database.sqlite.write_ahead_log", true)
+
 	viper.SetDefault("oidc.scope", []string{oidc.ScopeOpenID, "profile", "email"})
 	viper.SetDefault("oidc.strip_email_domain", true)
 	viper.SetDefault("oidc.only_start_if_oidc_is_available", true)
@@ -232,6 +238,7 @@ func LoadConfig(path string, isFile bool) error {
 
 	viper.SetDefault("ephemeral_node_inactivity_timeout", "120s")
 
+	viper.SetDefault("tuning.notifier_send_timeout", "800ms")
 	viper.SetDefault("tuning.batch_change_delay", "800ms")
 	viper.SetDefault("tuning.node_mapsession_buffered_chan_size", 30)
 
@@ -441,6 +448,7 @@ func GetDatabaseConfig() DatabaseConfig {
 			Path: util.AbsolutePathFromConfigPath(
 				viper.GetString("database.sqlite.path"),
 			),
+			WriteAheadLog: viper.GetBool("database.sqlite.write_ahead_log"),
 		},
 		Postgres: PostgresConfig{
 			Host:               viper.GetString("database.postgres.host"),
@@ -534,16 +542,6 @@ func GetDNSConfig() (*tailcfg.DNSConfig, string) {
 			dnsConfig.Domains = domains
 		}
 
-		if viper.IsSet("dns_config.domains") {
-			domains := viper.GetStringSlice("dns_config.domains")
-			if len(dnsConfig.Resolvers) > 0 {
-				dnsConfig.Domains = domains
-			} else if domains != nil {
-				log.Warn().
-					Msg("Warning: dns_config.domains is set, but no nameservers are configured. Ignoring domains.")
-			}
-		}
-
 		if viper.IsSet("dns_config.extra_records") {
 			var extraRecords []tailcfg.DNSRecord
 
@@ -569,8 +567,18 @@ func GetDNSConfig() (*tailcfg.DNSConfig, string) {
 			baseDomain = "headscale.net" // does not really matter when MagicDNS is not enabled
 		}
 
-		log.Trace().Interface("dns_config", dnsConfig).Msg("DNS configuration loaded")
+		if !viper.GetBool("dns_config.use_username_in_magic_dns") {
+			dnsConfig.Domains = []string{baseDomain}
+		} else {
+			log.Warn().Msg("DNS: Usernames in DNS has been deprecated, this option will be remove in future versions")
+			log.Warn().Msg("DNS: see 0.23.0 changelog for more information.")
+		}
 
+		if domains := viper.GetStringSlice("dns_config.domains"); len(domains) > 0 {
+			dnsConfig.Domains = append(dnsConfig.Domains, domains...)
+		}
+
+		log.Trace().Interface("dns_config", dnsConfig).Msg("DNS configuration loaded")
 		return dnsConfig, baseDomain
 	}
 
@@ -640,6 +648,9 @@ func GetHeadscaleConfig() (*Config, error) {
 		}, nil
 	}
 
+	logConfig := GetLogConfig()
+	zerolog.SetGlobalLevel(logConfig.Level)
+
 	prefix4, err := PrefixV4()
 	if err != nil {
 		return nil, err
@@ -650,6 +661,10 @@ func GetHeadscaleConfig() (*Config, error) {
 		return nil, err
 	}
 
+	if prefix4 == nil && prefix6 == nil {
+		return nil, fmt.Errorf("no IPv4 or IPv6 prefix configured, minimum one prefix is required")
+	}
+
 	allocStr := viper.GetString("prefixes.allocation")
 	var alloc IPAllocationStrategy
 	switch allocStr {
@@ -658,12 +673,12 @@ func GetHeadscaleConfig() (*Config, error) {
 	case string(IPAllocationStrategyRandom):
 		alloc = IPAllocationStrategyRandom
 	default:
-		log.Fatal().Msgf("config error, prefixes.allocation is set to %s, which is not a valid strategy, allowed options: %s, %s", allocStr, IPAllocationStrategySequential, IPAllocationStrategyRandom)
+		return nil, fmt.Errorf("config error, prefixes.allocation is set to %s, which is not a valid strategy, allowed options: %s, %s", allocStr, IPAllocationStrategySequential, IPAllocationStrategyRandom)
 	}
 
 	dnsConfig, baseDomain := GetDNSConfig()
 	derpConfig := GetDERPConfig()
-	logConfig := GetLogTailConfig()
+	logTailConfig := GetLogTailConfig()
 	randomizeClientPort := viper.GetBool("randomize_client_port")
 
 	oidcClientSecret := viper.GetString("oidc.client_secret")
@@ -706,7 +721,8 @@ func GetHeadscaleConfig() (*Config, error) {
 
 		TLS: GetTLSConfig(),
 
-		DNSConfig: dnsConfig,
+		DNSConfig:             dnsConfig,
+		DNSUserNameInMagicDNS: viper.GetBool("dns_config.use_username_in_magic_dns"),
 
 		ACMEEmail: viper.GetString("acme_email"),
 		ACMEURL:   viper.GetString("acme_url"),
@@ -745,7 +761,7 @@ func GetHeadscaleConfig() (*Config, error) {
 			UseExpiryFromToken: viper.GetBool("oidc.use_expiry_from_token"),
 		},
 
-		LogTail:             logConfig,
+		LogTail:             logTailConfig,
 		RandomizeClientPort: randomizeClientPort,
 
 		ACL: GetACLConfig(),
@@ -757,10 +773,11 @@ func GetHeadscaleConfig() (*Config, error) {
 			Insecure: viper.GetBool("cli.insecure"),
 		},
 
-		Log: GetLogConfig(),
+		Log: logConfig,
 
 		// TODO(kradalby): Document these settings when more stable
 		Tuning: Tuning{
+			NotifierSendTimeout:            viper.GetDuration("tuning.notifier_send_timeout"),
 			BatchChangeDelay:               viper.GetDuration("tuning.batch_change_delay"),
 			NodeMapSessionBufferedChanSize: viper.GetInt("tuning.node_mapsession_buffered_chan_size"),
 		},

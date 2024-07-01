@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/gorilla/mux"
 	grpcMiddleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpcRuntime "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
@@ -70,7 +71,7 @@ var (
 
 const (
 	AuthPrefix         = "Bearer "
-	updateInterval     = 5000
+	updateInterval     = 5 * time.Second
 	privateKeyFileMode = 0o600
 	headscaleDirPerm   = 0o700
 
@@ -104,16 +105,15 @@ type Headscale struct {
 	registrationCache *cache.Cache
 
 	pollNetMapStreamWG sync.WaitGroup
-
-	mapSessions  map[types.NodeID]*mapSession
-	mapSessionMu sync.Mutex
 }
 
 var (
-	profilingEnabled = envknob.Bool("HEADSCALE_PROFILING_ENABLED")
+	profilingEnabled = envknob.Bool("HEADSCALE_DEBUG_PROFILING_ENABLED")
+	profilingPath    = envknob.String("HEADSCALE_DEBUG_PROFILING_PATH")
 	tailsqlEnabled   = envknob.Bool("HEADSCALE_DEBUG_TAILSQL_ENABLED")
 	tailsqlStateDir  = envknob.String("HEADSCALE_DEBUG_TAILSQL_STATE_DIR")
 	tailsqlTSKey     = envknob.String("TS_AUTHKEY")
+	dumpConfig       = envknob.Bool("HEADSCALE_DEBUG_DUMP_CONFIG")
 )
 
 func NewHeadscale(cfg *types.Config) (*Headscale, error) {
@@ -137,8 +137,7 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 		noisePrivateKey:    noisePrivateKey,
 		registrationCache:  registrationCache,
 		pollNetMapStreamWG: sync.WaitGroup{},
-		nodeNotifier:       notifier.NewNotifier(),
-		mapSessions:        make(map[types.NodeID]*mapSession),
+		nodeNotifier:       notifier.NewNotifier(cfg),
 	}
 
 	app.db, err = db.NewHeadscaleDatabase(
@@ -219,64 +218,75 @@ func (h *Headscale) redirect(w http.ResponseWriter, req *http.Request) {
 
 // deleteExpireEphemeralNodes deletes ephemeral node records that have not been
 // seen for longer than h.cfg.EphemeralNodeInactivityTimeout.
-func (h *Headscale) deleteExpireEphemeralNodes(milliSeconds int64) {
-	ticker := time.NewTicker(time.Duration(milliSeconds) * time.Millisecond)
+func (h *Headscale) deleteExpireEphemeralNodes(ctx context.Context, every time.Duration) {
+	ticker := time.NewTicker(every)
 
-	for range ticker.C {
-		var removed []types.NodeID
-		var changed []types.NodeID
-		if err := h.db.DB.Transaction(func(tx *gorm.DB) error {
-			removed, changed = db.DeleteExpiredEphemeralNodes(tx, h.cfg.EphemeralNodeInactivityTimeout)
+	for {
+		select {
+		case <-ctx.Done():
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			var removed []types.NodeID
+			var changed []types.NodeID
+			if err := h.db.Write(func(tx *gorm.DB) error {
+				removed, changed = db.DeleteExpiredEphemeralNodes(tx, h.cfg.EphemeralNodeInactivityTimeout)
 
-			return nil
-		}); err != nil {
-			log.Error().Err(err).Msg("database error while expiring ephemeral nodes")
-			continue
-		}
+				return nil
+			}); err != nil {
+				log.Error().Err(err).Msg("database error while expiring ephemeral nodes")
+				continue
+			}
 
-		if removed != nil {
-			ctx := types.NotifyCtx(context.Background(), "expire-ephemeral", "na")
-			h.nodeNotifier.NotifyAll(ctx, types.StateUpdate{
-				Type:    types.StatePeerRemoved,
-				Removed: removed,
-			})
-		}
+			if removed != nil {
+				ctx := types.NotifyCtx(context.Background(), "expire-ephemeral", "na")
+				h.nodeNotifier.NotifyAll(ctx, types.StateUpdate{
+					Type:    types.StatePeerRemoved,
+					Removed: removed,
+				})
+			}
 
-		if changed != nil {
-			ctx := types.NotifyCtx(context.Background(), "expire-ephemeral", "na")
-			h.nodeNotifier.NotifyAll(ctx, types.StateUpdate{
-				Type:        types.StatePeerChanged,
-				ChangeNodes: changed,
-			})
+			if changed != nil {
+				ctx := types.NotifyCtx(context.Background(), "expire-ephemeral", "na")
+				h.nodeNotifier.NotifyAll(ctx, types.StateUpdate{
+					Type:        types.StatePeerChanged,
+					ChangeNodes: changed,
+				})
+			}
 		}
 	}
 }
 
-// expireExpiredMachines expires nodes that have an explicit expiry set
+// expireExpiredNodes expires nodes that have an explicit expiry set
 // after that expiry time has passed.
-func (h *Headscale) expireExpiredMachines(intervalMs int64) {
-	interval := time.Duration(intervalMs) * time.Millisecond
-	ticker := time.NewTicker(interval)
+func (h *Headscale) expireExpiredNodes(ctx context.Context, every time.Duration) {
+	ticker := time.NewTicker(every)
 
 	lastCheck := time.Unix(0, 0)
 	var update types.StateUpdate
 	var changed bool
 
-	for range ticker.C {
-		if err := h.db.DB.Transaction(func(tx *gorm.DB) error {
-			lastCheck, update, changed = db.ExpireExpiredNodes(tx, lastCheck)
+	for {
+		select {
+		case <-ctx.Done():
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			if err := h.db.Write(func(tx *gorm.DB) error {
+				lastCheck, update, changed = db.ExpireExpiredNodes(tx, lastCheck)
 
-			return nil
-		}); err != nil {
-			log.Error().Err(err).Msg("database error while expiring nodes")
-			continue
-		}
+				return nil
+			}); err != nil {
+				log.Error().Err(err).Msg("database error while expiring nodes")
+				continue
+			}
 
-		if changed {
-			log.Trace().Interface("nodes", update.ChangePatches).Msgf("expiring nodes")
+			if changed {
+				log.Trace().Interface("nodes", update.ChangePatches).Msgf("expiring nodes")
 
-			ctx := types.NotifyCtx(context.Background(), "expire-expired", "na")
-			h.nodeNotifier.NotifyAll(ctx, update)
+				ctx := types.NotifyCtx(context.Background(), "expire-expired", "na")
+				h.nodeNotifier.NotifyAll(ctx, update)
+			}
 		}
 	}
 }
@@ -319,7 +329,7 @@ func (h *Headscale) grpcAuthenticationInterceptor(ctx context.Context,
 	// Check if the request is coming from the on-server client.
 	// This is not secure, but it is to maintain maintainability
 	// with the "legacy" database-based client
-	// It is also neede for grpc-gateway to be able to connect to
+	// It is also needed for grpc-gateway to be able to connect to
 	// the server
 	client, _ := peer.FromContext(ctx)
 
@@ -452,7 +462,7 @@ func (h *Headscale) ensureUnixSocketIsAbsent() error {
 
 func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *mux.Router {
 	router := mux.NewRouter()
-	router.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
+	router.Use(prometheusMiddleware)
 
 	router.HandleFunc(ts2021UpgradePath, h.NoiseUpgradeHandler).Methods(http.MethodPost)
 
@@ -491,14 +501,14 @@ func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *mux.Router {
 
 // Serve launches the HTTP and gRPC server service Headscale and the API.
 func (h *Headscale) Serve() error {
-	if _, enableProfile := os.LookupEnv("HEADSCALE_PROFILING_ENABLED"); enableProfile {
-		if profilePath, ok := os.LookupEnv("HEADSCALE_PROFILING_PATH"); ok {
-			err := os.MkdirAll(profilePath, os.ModePerm)
+	if profilingEnabled {
+		if profilingPath != "" {
+			err := os.MkdirAll(profilingPath, os.ModePerm)
 			if err != nil {
 				log.Fatal().Err(err).Msg("failed to create profiling directory")
 			}
 
-			defer profile.Start(profile.ProfilePath(profilePath)).Stop()
+			defer profile.Start(profile.ProfilePath(profilingPath)).Stop()
 		} else {
 			defer profile.Start().Stop()
 		}
@@ -506,9 +516,13 @@ func (h *Headscale) Serve() error {
 
 	var err error
 
+	if dumpConfig {
+		spew.Dump(h.cfg)
+	}
+
 	// Fetch an initial DERP Map before we start serving
 	h.DERPMap = derp.GetDERPMap(h.cfg.DERP)
-	h.mapper = mapper.NewMapper(h.db, h.cfg, h.DERPMap, h.nodeNotifier.ConnectedMap())
+	h.mapper = mapper.NewMapper(h.db, h.cfg, h.DERPMap, h.nodeNotifier)
 
 	if h.cfg.DERP.ServerEnabled {
 		// When embedded DERP is enabled we always need a STUN server
@@ -538,10 +552,13 @@ func (h *Headscale) Serve() error {
 		return errEmptyInitialDERPMap
 	}
 
-	// TODO(kradalby): These should have cancel channels and be cleaned
-	// up on shutdown.
-	go h.deleteExpireEphemeralNodes(updateInterval)
-	go h.expireExpiredMachines(updateInterval)
+	expireEphemeralCtx, expireEphemeralCancel := context.WithCancel(context.Background())
+	defer expireEphemeralCancel()
+	go h.deleteExpireEphemeralNodes(expireEphemeralCtx, updateInterval)
+
+	expireNodeCtx, expireNodeCancel := context.WithCancel(context.Background())
+	defer expireNodeCancel()
+	go h.expireExpiredNodes(expireNodeCtx, updateInterval)
 
 	if zl.GlobalLevel() == zl.TraceLevel {
 		zerolog.RespLog = true
@@ -680,7 +697,7 @@ func (h *Headscale) Serve() error {
 	// HTTP setup
 	//
 	// This is the regular router that we expose
-	// over our main Addr. It also serves the legacy Tailcale API
+	// over our main Addr
 	router := h.createRouter(grpcGatewayMux)
 
 	httpServer := &http.Server{
@@ -710,26 +727,10 @@ func (h *Headscale) Serve() error {
 		Msgf("listening and serving HTTP on: %s", h.cfg.Addr)
 
 	debugMux := http.NewServeMux()
+	debugMux.Handle("/debug/pprof/", http.DefaultServeMux)
 	debugMux.HandleFunc("/debug/notifier", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(h.nodeNotifier.String()))
-
-		return
-	})
-	debugMux.HandleFunc("/debug/mapresp", func(w http.ResponseWriter, r *http.Request) {
-		h.mapSessionMu.Lock()
-		defer h.mapSessionMu.Unlock()
-
-		var b strings.Builder
-		b.WriteString("mapresponders:\n")
-		for k, v := range h.mapSessions {
-			fmt.Fprintf(&b, "\t%d: %p\n", k, v)
-		}
-
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(b.String()))
-
-		return
 	})
 	debugMux.Handle("/metrics", promhttp.Handler())
 
@@ -803,10 +804,15 @@ func (h *Headscale) Serve() error {
 				}
 
 			default:
+				trace := log.Trace().Msgf
 				log.Info().
 					Str("signal", sig.String()).
 					Msg("Received signal to stop, shutting down gracefully")
 
+				expireNodeCancel()
+				expireEphemeralCancel()
+
+				trace("waiting for netmap stream to close")
 				h.pollNetMapStreamWG.Wait()
 
 				// Gracefully shut down servers
@@ -814,32 +820,44 @@ func (h *Headscale) Serve() error {
 					context.Background(),
 					types.HTTPShutdownTimeout,
 				)
+				trace("shutting down debug http server")
 				if err := debugHTTPServer.Shutdown(ctx); err != nil {
 					log.Error().Err(err).Msg("Failed to shutdown prometheus http")
 				}
+				trace("shutting down main http server")
 				if err := httpServer.Shutdown(ctx); err != nil {
 					log.Error().Err(err).Msg("Failed to shutdown http")
 				}
+
+				trace("shutting down grpc server (socket)")
 				grpcSocket.GracefulStop()
 
 				if grpcServer != nil {
+					trace("shutting down grpc server (external)")
 					grpcServer.GracefulStop()
 					grpcListener.Close()
 				}
 
 				if tailsqlContext != nil {
+					trace("shutting down tailsql")
 					tailsqlContext.Done()
 				}
 
+				trace("closing node notifier")
+				h.nodeNotifier.Close()
+
 				// Close network listeners
+				trace("closing network listeners")
 				debugHTTPListener.Close()
 				httpListener.Close()
 				grpcGatewayConn.Close()
 
 				// Stop listening (and unlink the socket if unix type):
+				trace("closing socket listener")
 				socketListener.Close()
 
 				// Close db connections
+				trace("closing database connection")
 				err = h.db.Close()
 				if err != nil {
 					log.Error().Err(err).Msg("Failed to close db")

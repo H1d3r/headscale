@@ -10,10 +10,21 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
+	"github.com/puzpuzpuz/xsync/v3"
 	"gopkg.in/check.v1"
 	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
 )
+
+var smap = func(m map[types.NodeID]bool) *xsync.MapOf[types.NodeID, bool] {
+	s := xsync.NewMapOf[types.NodeID, bool]()
+
+	for k, v := range m {
+		s.Store(k, v)
+	}
+
+	return s
+}
 
 func (s *Suite) TestGetRoutes(c *check.C) {
 	user, err := db.CreateUser("test")
@@ -32,15 +43,17 @@ func (s *Suite) TestGetRoutes(c *check.C) {
 		RoutableIPs: []netip.Prefix{route},
 	}
 
+	pakID := uint(pak.ID)
 	node := types.Node{
 		ID:             0,
 		Hostname:       "test_get_route_node",
 		UserID:         user.ID,
 		RegisterMethod: util.RegisterMethodAuthKey,
-		AuthKeyID:      uint(pak.ID),
+		AuthKeyID:      &pakID,
 		Hostinfo:       &hostInfo,
 	}
-	db.DB.Save(&node)
+	trx := db.DB.Save(&node)
+	c.Assert(trx.Error, check.IsNil)
 
 	su, err := db.SaveNodeRoutes(&node)
 	c.Assert(err, check.IsNil)
@@ -82,15 +95,17 @@ func (s *Suite) TestGetEnableRoutes(c *check.C) {
 		RoutableIPs: []netip.Prefix{route, route2},
 	}
 
+	pakID := uint(pak.ID)
 	node := types.Node{
 		ID:             0,
 		Hostname:       "test_enable_route_node",
 		UserID:         user.ID,
 		RegisterMethod: util.RegisterMethodAuthKey,
-		AuthKeyID:      uint(pak.ID),
+		AuthKeyID:      &pakID,
 		Hostinfo:       &hostInfo,
 	}
-	db.DB.Save(&node)
+	trx := db.DB.Save(&node)
+	c.Assert(trx.Error, check.IsNil)
 
 	sendUpdate, err := db.SaveNodeRoutes(&node)
 	c.Assert(err, check.IsNil)
@@ -154,15 +169,17 @@ func (s *Suite) TestIsUniquePrefix(c *check.C) {
 	hostInfo1 := tailcfg.Hostinfo{
 		RoutableIPs: []netip.Prefix{route, route2},
 	}
+	pakID := uint(pak.ID)
 	node1 := types.Node{
 		ID:             1,
 		Hostname:       "test_enable_route_node",
 		UserID:         user.ID,
 		RegisterMethod: util.RegisterMethodAuthKey,
-		AuthKeyID:      uint(pak.ID),
+		AuthKeyID:      &pakID,
 		Hostinfo:       &hostInfo1,
 	}
-	db.DB.Save(&node1)
+	trx := db.DB.Save(&node1)
+	c.Assert(trx.Error, check.IsNil)
 
 	sendUpdate, err := db.SaveNodeRoutes(&node1)
 	c.Assert(err, check.IsNil)
@@ -182,7 +199,7 @@ func (s *Suite) TestIsUniquePrefix(c *check.C) {
 		Hostname:       "test_enable_route_node",
 		UserID:         user.ID,
 		RegisterMethod: util.RegisterMethodAuthKey,
-		AuthKeyID:      uint(pak.ID),
+		AuthKeyID:      &pakID,
 		Hostinfo:       &hostInfo2,
 	}
 	db.DB.Save(&node2)
@@ -236,16 +253,18 @@ func (s *Suite) TestDeleteRoutes(c *check.C) {
 	}
 
 	now := time.Now()
+	pakID := uint(pak.ID)
 	node1 := types.Node{
 		ID:             1,
 		Hostname:       "test_enable_route_node",
 		UserID:         user.ID,
 		RegisterMethod: util.RegisterMethodAuthKey,
-		AuthKeyID:      uint(pak.ID),
+		AuthKeyID:      &pakID,
 		Hostinfo:       &hostInfo1,
 		LastSeen:       &now,
 	}
-	db.DB.Save(&node1)
+	trx := db.DB.Save(&node1)
+	c.Assert(trx.Error, check.IsNil)
 
 	sendUpdate, err := db.SaveNodeRoutes(&node1)
 	c.Assert(err, check.IsNil)
@@ -331,7 +350,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 		name        string
 		nodes       types.Nodes
 		routes      types.Routes
-		isConnected []types.NodeConnectedMap
+		isConnected []map[types.NodeID]bool
 		want        []*types.StateUpdate
 		wantErr     bool
 	}{
@@ -346,7 +365,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				r(1, 1, ipp("10.0.0.0/24"), true, true),
 				r(2, 2, ipp("10.0.0.0/24"), true, false),
 			},
-			isConnected: []types.NodeConnectedMap{
+			isConnected: []map[types.NodeID]bool{
 				// n1 goes down
 				{
 					1: false,
@@ -384,7 +403,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				r(1, 1, ipp("10.0.0.0/24"), true, true),
 				r(2, 2, ipp("10.0.0.0/24"), true, false),
 			},
-			isConnected: []types.NodeConnectedMap{
+			isConnected: []map[types.NodeID]bool{
 				// n1 up recon = noop
 				{
 					1: true,
@@ -428,7 +447,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				r(2, 2, ipp("10.0.0.0/24"), true, false),
 				r(3, 3, ipp("10.0.0.0/24"), true, false),
 			},
-			isConnected: []types.NodeConnectedMap{
+			isConnected: []map[types.NodeID]bool{
 				// n1 goes down
 				{
 					1: false,
@@ -486,7 +505,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				r(2, 2, ipp("10.0.0.0/24"), false, false),
 				r(3, 3, ipp("10.0.0.0/24"), true, false),
 			},
-			isConnected: []types.NodeConnectedMap{
+			isConnected: []map[types.NodeID]bool{
 				// n1 goes down
 				{
 					1: false,
@@ -516,7 +535,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				r(2, 2, ipp("10.0.0.0/24"), true, false),
 				r(3, 3, ipp("10.1.0.0/24"), true, false),
 			},
-			isConnected: []types.NodeConnectedMap{
+			isConnected: []map[types.NodeID]bool{
 				// n1 goes down
 				{
 					1: false,
@@ -539,7 +558,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				r(2, 2, ipp("10.0.0.0/24"), true, false),
 				r(3, 3, ipp("10.1.0.0/24"), false, false),
 			},
-			isConnected: []types.NodeConnectedMap{
+			isConnected: []map[types.NodeID]bool{
 				// n1 goes down
 				{
 					1: false,
@@ -562,7 +581,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				r(2, 2, ipp("10.0.0.0/24"), true, false),
 				r(3, 3, ipp("10.1.0.0/24"), true, false),
 			},
-			isConnected: []types.NodeConnectedMap{
+			isConnected: []map[types.NodeID]bool{
 				// n1 goes down
 				{
 					1: false,
@@ -585,7 +604,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				r(2, 2, ipp("10.0.0.0/24"), true, true),
 				r(3, 3, ipp("10.1.0.0/24"), true, false),
 			},
-			isConnected: []types.NodeConnectedMap{
+			isConnected: []map[types.NodeID]bool{
 				// n1 goes down
 				{
 					1: true,
@@ -606,7 +625,16 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 
 			db := dbForTest(t, tt.name)
 
+			user := types.User{Name: tt.name}
+			if err := db.DB.Save(&user).Error; err != nil {
+				t.Fatalf("failed to create user: %s", err)
+			}
+
 			for _, route := range tt.routes {
+				route.Node.User = user
+				if err := db.DB.Save(&route.Node).Error; err != nil {
+					t.Fatalf("failed to create node: %s", err)
+				}
 				if err := db.DB.Save(&route).Error; err != nil {
 					t.Fatalf("failed to create route: %s", err)
 				}
@@ -618,7 +646,7 @@ func TestFailoverNodeRoutesIfNeccessary(t *testing.T) {
 				want := tt.want[step]
 
 				got, err := Write(db.DB, func(tx *gorm.DB) (*types.StateUpdate, error) {
-					return FailoverNodeRoutesIfNeccessary(tx, isConnected, node)
+					return FailoverNodeRoutesIfNeccessary(tx, smap(isConnected), node)
 				})
 
 				if (err != nil) != tt.wantErr {
@@ -640,7 +668,7 @@ func TestFailoverRouteTx(t *testing.T) {
 		name         string
 		failingRoute types.Route
 		routes       types.Routes
-		isConnected  types.NodeConnectedMap
+		isConnected  map[types.NodeID]bool
 		want         []types.NodeID
 		wantErr      bool
 	}{
@@ -743,7 +771,7 @@ func TestFailoverRouteTx(t *testing.T) {
 					Enabled:   true,
 				},
 			},
-			isConnected: types.NodeConnectedMap{
+			isConnected: map[types.NodeID]bool{
 				1: false,
 				2: true,
 			},
@@ -841,7 +869,7 @@ func TestFailoverRouteTx(t *testing.T) {
 					Enabled:   true,
 				},
 			},
-			isConnected: types.NodeConnectedMap{
+			isConnected: map[types.NodeID]bool{
 				1: true,
 				2: true,
 				3: true,
@@ -889,7 +917,7 @@ func TestFailoverRouteTx(t *testing.T) {
 					Enabled:   true,
 				},
 			},
-			isConnected: types.NodeConnectedMap{
+			isConnected: map[types.NodeID]bool{
 				1: true,
 				4: false,
 			},
@@ -945,7 +973,7 @@ func TestFailoverRouteTx(t *testing.T) {
 					Enabled:   true,
 				},
 			},
-			isConnected: types.NodeConnectedMap{
+			isConnected: map[types.NodeID]bool{
 				1: false,
 				2: true,
 				4: false,
@@ -1002,15 +1030,23 @@ func TestFailoverRouteTx(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			db := dbForTest(t, tt.name)
+			user := types.User{Name: "test"}
+			if err := db.DB.Save(&user).Error; err != nil {
+				t.Fatalf("failed to create user: %s", err)
+			}
 
 			for _, route := range tt.routes {
+				route.Node.User = user
+				if err := db.DB.Save(&route.Node).Error; err != nil {
+					t.Fatalf("failed to create node: %s", err)
+				}
 				if err := db.DB.Save(&route).Error; err != nil {
 					t.Fatalf("failed to create route: %s", err)
 				}
 			}
 
 			got, err := Write(db.DB, func(tx *gorm.DB) ([]types.NodeID, error) {
-				return failoverRouteTx(tx, tt.isConnected, &tt.failingRoute)
+				return failoverRouteTx(tx, smap(tt.isConnected), &tt.failingRoute)
 			})
 
 			if (err != nil) != tt.wantErr {
@@ -1048,7 +1084,7 @@ func TestFailoverRoute(t *testing.T) {
 		name         string
 		failingRoute types.Route
 		routes       types.Routes
-		isConnected  types.NodeConnectedMap
+		isConnected  map[types.NodeID]bool
 		want         *failover
 	}{
 		{
@@ -1085,7 +1121,7 @@ func TestFailoverRoute(t *testing.T) {
 				r(1, 1, ipp("10.0.0.0/24"), true, true),
 				r(2, 2, ipp("10.0.0.0/24"), true, false),
 			},
-			isConnected: types.NodeConnectedMap{
+			isConnected: map[types.NodeID]bool{
 				1: false,
 				2: true,
 			},
@@ -1111,7 +1147,7 @@ func TestFailoverRoute(t *testing.T) {
 				r(2, 2, ipp("10.0.0.0/24"), true, true),
 				r(3, 3, ipp("10.0.0.0/24"), true, false),
 			},
-			isConnected: types.NodeConnectedMap{
+			isConnected: map[types.NodeID]bool{
 				1: true,
 				2: true,
 				3: true,
@@ -1128,7 +1164,7 @@ func TestFailoverRoute(t *testing.T) {
 				r(1, 1, ipp("10.0.0.0/24"), true, true),
 				r(2, 4, ipp("10.0.0.0/24"), true, false),
 			},
-			isConnected: types.NodeConnectedMap{
+			isConnected: map[types.NodeID]bool{
 				1: true,
 				4: false,
 			},
@@ -1142,7 +1178,7 @@ func TestFailoverRoute(t *testing.T) {
 				r(2, 4, ipp("10.0.0.0/24"), true, false),
 				r(3, 2, ipp("10.0.0.0/24"), true, false),
 			},
-			isConnected: types.NodeConnectedMap{
+			isConnected: map[types.NodeID]bool{
 				1: false,
 				2: true,
 				4: false,
@@ -1172,7 +1208,7 @@ func TestFailoverRoute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotf := failoverRoute(tt.isConnected, &tt.failingRoute, tt.routes)
+			gotf := failoverRoute(smap(tt.isConnected), &tt.failingRoute, tt.routes)
 
 			if tt.want == nil && gotf != nil {
 				t.Fatalf("expected nil, got %+v", gotf)

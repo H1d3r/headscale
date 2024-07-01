@@ -91,6 +91,7 @@ func NewHeadscaleDatabase(
 					_ = tx.Migrator().
 						RenameColumn(&types.Node{}, "nickname", "given_name")
 
+					dbConn.Model(&types.Node{}).Where("auth_key_id = ?", 0).Update("auth_key_id", nil)
 					// If the Node table has a column for registered,
 					// find all occourences of "false" and drop them. Then
 					// remove the column.
@@ -318,14 +319,8 @@ func NewHeadscaleDatabase(
 				// no longer used.
 				ID: "202402151347",
 				Migrate: func(tx *gorm.DB) error {
-					err := tx.Migrator().DropColumn(&types.Node{}, "last_successful_update")
-					if err != nil && strings.Contains(err.Error(), `of relation "nodes" does not exist`) {
-						return nil
-					} else {
-						return err
-					}
-
-					return err
+					_ = tx.Migrator().DropColumn(&types.Node{}, "last_successful_update")
+					return nil
 				},
 				Rollback: func(tx *gorm.DB) error {
 					return nil
@@ -439,14 +434,29 @@ func openDB(cfg types.DatabaseConfig) (*gorm.DB, error) {
 			Msg("Opening database")
 
 		db, err := gorm.Open(
-			sqlite.Open(cfg.Sqlite.Path+"?_synchronous=1&_journal_mode=WAL"),
+			sqlite.Open(cfg.Sqlite.Path),
 			&gorm.Config{
-				DisableForeignKeyConstraintWhenMigrating: true,
-				Logger:                                   dbLogger,
+				Logger: dbLogger,
 			},
 		)
 
-		db.Exec("PRAGMA foreign_keys=ON")
+		if err := db.Exec(`
+			PRAGMA foreign_keys=ON;
+			PRAGMA busy_timeout=10000;
+			PRAGMA auto_vacuum=INCREMENTAL;
+			PRAGMA synchronous=NORMAL;
+			`).Error; err != nil {
+			return nil, fmt.Errorf("enabling foreign keys: %w", err)
+		}
+
+		if cfg.Sqlite.WriteAheadLog {
+			if err := db.Exec(`
+				PRAGMA journal_mode=WAL;
+				PRAGMA wal_autocheckpoint=0;
+				`).Error; err != nil {
+				return nil, fmt.Errorf("setting WAL mode: %w", err)
+			}
+		}
 
 		// The pure Go SQLite library does not handle locking in
 		// the same way as the C based one and we cant use the gorm
@@ -488,8 +498,7 @@ func openDB(cfg types.DatabaseConfig) (*gorm.DB, error) {
 		}
 
 		db, err := gorm.Open(postgres.Open(dbString), &gorm.Config{
-			DisableForeignKeyConstraintWhenMigrating: true,
-			Logger:                                   dbLogger,
+			Logger: dbLogger,
 		})
 		if err != nil {
 			return nil, err

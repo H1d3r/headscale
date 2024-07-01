@@ -28,7 +28,8 @@ var (
 )
 
 type NodeID uint64
-type NodeConnectedMap map[NodeID]bool
+
+// type NodeConnectedMap *xsync.MapOf[NodeID, bool]
 
 func (id NodeID) StableID() tailcfg.StableNodeID {
 	return tailcfg.StableNodeID(strconv.FormatUint(uint64(id), util.Base10))
@@ -40,6 +41,10 @@ func (id NodeID) NodeID() tailcfg.NodeID {
 
 func (id NodeID) Uint64() uint64 {
 	return uint64(id)
+}
+
+func (id NodeID) String() string {
+	return strconv.FormatUint(id.Uint64(), util.Base10)
 }
 
 // Node is a Headscale client.
@@ -107,20 +112,20 @@ type Node struct {
 	// parts of headscale.
 	GivenName string `gorm:"type:varchar(63);unique_index"`
 	UserID    uint
-	User      User `gorm:"foreignKey:UserID"`
+	User      User `gorm:"constraint:OnDelete:CASCADE;"`
 
 	RegisterMethod string
 
 	ForcedTags StringList
 
 	// TODO(kradalby): This seems like irrelevant information?
-	AuthKeyID uint
-	AuthKey   *PreAuthKey
+	AuthKeyID *uint       `sql:"DEFAULT:NULL"`
+	AuthKey   *PreAuthKey `gorm:"constraint:OnDelete:SET NULL;"`
 
 	LastSeen *time.Time
 	Expiry   *time.Time
 
-	Routes []Route
+	Routes []Route `gorm:"constraint:OnDelete:CASCADE;"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -305,11 +310,15 @@ func (node *Node) AfterFind(tx *gorm.DB) error {
 	}
 	node.NodeKey = nodeKey
 
-	var discoKey key.DiscoPublic
-	if err := discoKey.UnmarshalText([]byte(node.DiscoKeyDatabaseField)); err != nil {
-		return fmt.Errorf("unmarshalling disco key from db: %w", err)
+	// DiscoKey might be empty if a node has not sent it to headscale.
+	// This means that this might fail if the disco key is empty.
+	if node.DiscoKeyDatabaseField != "" {
+		var discoKey key.DiscoPublic
+		if err := discoKey.UnmarshalText([]byte(node.DiscoKeyDatabaseField)); err != nil {
+			return fmt.Errorf("unmarshalling disco key from db: %w", err)
+		}
+		node.DiscoKey = discoKey
 	}
-	node.DiscoKey = discoKey
 
 	endpoints := make([]netip.AddrPort, len(node.EndpointsDatabaseField))
 	for idx, ep := range node.EndpointsDatabaseField {
@@ -385,23 +394,32 @@ func (node *Node) Proto() *v1.Node {
 	return nodeProto
 }
 
-func (node *Node) GetFQDN(dnsConfig *tailcfg.DNSConfig, baseDomain string) (string, error) {
+func (node *Node) GetFQDN(cfg *Config, baseDomain string) (string, error) {
 	var hostname string
-	if dnsConfig != nil && dnsConfig.Proxied { // MagicDNS
+	if cfg.DNSConfig != nil && cfg.DNSConfig.Proxied { // MagicDNS
 		if node.GivenName == "" {
 			return "", fmt.Errorf("failed to create valid FQDN: %w", ErrNodeHasNoGivenName)
 		}
 
-		if node.User.Name == "" {
-			return "", fmt.Errorf("failed to create valid FQDN: %w", ErrNodeUserHasNoName)
-		}
-
 		hostname = fmt.Sprintf(
-			"%s.%s.%s",
+			"%s.%s",
 			node.GivenName,
-			node.User.Name,
 			baseDomain,
 		)
+
+		if cfg.DNSUserNameInMagicDNS {
+			if node.User.Name == "" {
+				return "", fmt.Errorf("failed to create valid FQDN: %w", ErrNodeUserHasNoName)
+			}
+
+			hostname = fmt.Sprintf(
+				"%s.%s.%s",
+				node.GivenName,
+				node.User.Name,
+				baseDomain,
+			)
+		}
+
 		if len(hostname) > MaxHostnameLength {
 			return "", fmt.Errorf(
 				"failed to create valid FQDN (%s): %w",

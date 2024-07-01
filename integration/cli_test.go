@@ -32,7 +32,7 @@ func TestUserCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -112,7 +112,7 @@ func TestPreAuthKeyCommand(t *testing.T) {
 	user := "preauthkeyspace"
 	count := 3
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -254,7 +254,7 @@ func TestPreAuthKeyCommandWithoutExpiry(t *testing.T) {
 
 	user := "pre-auth-key-without-exp-user"
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -317,7 +317,7 @@ func TestPreAuthKeyCommandReusableEphemeral(t *testing.T) {
 
 	user := "pre-auth-key-reus-ephm-user"
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -388,13 +388,108 @@ func TestPreAuthKeyCommandReusableEphemeral(t *testing.T) {
 	assert.Len(t, listedPreAuthKeys, 3)
 }
 
+func TestPreAuthKeyCorrectUserLoggedInCommand(t *testing.T) {
+	IntegrationSkip(t)
+	t.Parallel()
+
+	user1 := "user1"
+	user2 := "user2"
+
+	scenario, err := NewScenario(dockertestMaxWait())
+	assertNoErr(t, err)
+	defer scenario.Shutdown()
+
+	spec := map[string]int{
+		user1: 1,
+		user2: 0,
+	}
+
+	err = scenario.CreateHeadscaleEnv(spec, []tsic.Option{}, hsic.WithTestName("clipak"))
+	assertNoErr(t, err)
+
+	headscale, err := scenario.Headscale()
+	assertNoErr(t, err)
+
+	var user2Key v1.PreAuthKey
+
+	err = executeAndUnmarshal(
+		headscale,
+		[]string{
+			"headscale",
+			"preauthkeys",
+			"--user",
+			user2,
+			"create",
+			"--reusable",
+			"--expiration",
+			"24h",
+			"--output",
+			"json",
+			"--tags",
+			"tag:test1,tag:test2",
+		},
+		&user2Key,
+	)
+	assertNoErr(t, err)
+
+	allClients, err := scenario.ListTailscaleClients()
+	assertNoErrListClients(t, err)
+
+	assert.Len(t, allClients, 1)
+
+	client := allClients[0]
+
+	// Log out from user1
+	err = client.Logout()
+	assertNoErr(t, err)
+
+	err = scenario.WaitForTailscaleLogout()
+	assertNoErr(t, err)
+
+	status, err := client.Status()
+	assertNoErr(t, err)
+	if status.BackendState == "Starting" || status.BackendState == "Running" {
+		t.Fatalf("expected node to be logged out, backend state: %s", status.BackendState)
+	}
+
+	err = client.Login(headscale.GetEndpoint(), user2Key.GetKey())
+	assertNoErr(t, err)
+
+	status, err = client.Status()
+	assertNoErr(t, err)
+	if status.BackendState != "Running" {
+		t.Fatalf("expected node to be logged in, backend state: %s", status.BackendState)
+	}
+
+	if status.Self.UserID.String() != "userid:2" {
+		t.Fatalf("expected node to be logged in as userid:2, got: %s", status.Self.UserID.String())
+	}
+
+	var listNodes []v1.Node
+	err = executeAndUnmarshal(
+		headscale,
+		[]string{
+			"headscale",
+			"nodes",
+			"list",
+			"--output",
+			"json",
+		},
+		&listNodes,
+	)
+	assert.Nil(t, err)
+	assert.Len(t, listNodes, 1)
+
+	assert.Equal(t, "user2", listNodes[0].User.Name)
+}
+
 func TestApiKeyCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
 	count := 5
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -562,7 +657,7 @@ func TestNodeTagCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -695,7 +790,7 @@ func TestNodeAdvertiseTagNoACLCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -745,7 +840,7 @@ func TestNodeAdvertiseTagWithACLCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -808,7 +903,7 @@ func TestNodeCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -1049,7 +1144,7 @@ func TestNodeExpireCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -1176,7 +1271,7 @@ func TestNodeRenameCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -1343,7 +1438,7 @@ func TestNodeMoveCommand(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 

@@ -36,6 +36,38 @@ const (
 	expectedTokenItems = 2
 )
 
+var theInternetSet *netipx.IPSet
+
+// theInternet returns the IPSet for the Internet.
+// https://www.youtube.com/watch?v=iDbyYGrswtg
+func theInternet() *netipx.IPSet {
+	if theInternetSet != nil {
+		return theInternetSet
+	}
+
+	var internetBuilder netipx.IPSetBuilder
+	internetBuilder.AddPrefix(netip.MustParsePrefix("2000::/3"))
+	internetBuilder.AddPrefix(netip.MustParsePrefix("0.0.0.0/0"))
+
+	// Delete Private network addresses
+	// https://datatracker.ietf.org/doc/html/rfc1918
+	internetBuilder.RemovePrefix(netip.MustParsePrefix("fc00::/7"))
+	internetBuilder.RemovePrefix(netip.MustParsePrefix("10.0.0.0/8"))
+	internetBuilder.RemovePrefix(netip.MustParsePrefix("172.16.0.0/12"))
+	internetBuilder.RemovePrefix(netip.MustParsePrefix("192.168.0.0/16"))
+
+	// Delete Tailscale networks
+	internetBuilder.RemovePrefix(netip.MustParsePrefix("fd7a:115c:a1e0::/48"))
+	internetBuilder.RemovePrefix(netip.MustParsePrefix("100.64.0.0/10"))
+
+	// Delete "cant find DHCP networks"
+	internetBuilder.RemovePrefix(netip.MustParsePrefix("fe80::/10")) // link-loca
+	internetBuilder.RemovePrefix(netip.MustParsePrefix("169.254.0.0/16"))
+
+	theInternetSet, _ := internetBuilder.IPSet()
+	return theInternetSet
+}
+
 // For some reason golang.org/x/net/internal/iana is an internal package.
 const (
 	protocolICMP     = 1   // Internet Control Message
@@ -148,14 +180,14 @@ func (pol *ACLPolicy) CompileFilterRules(
 		return tailcfg.FilterAllowAll, nil
 	}
 
-	rules := []tailcfg.FilterRule{}
+	var rules []tailcfg.FilterRule
 
 	for index, acl := range pol.ACLs {
 		if acl.Action != "accept" {
 			return nil, ErrInvalidAction
 		}
 
-		srcIPs := []string{}
+		var srcIPs []string
 		for srcIndex, src := range acl.Sources {
 			srcs, err := pol.expandSource(src, nodes)
 			if err != nil {
@@ -189,7 +221,7 @@ func (pol *ACLPolicy) CompileFilterRules(
 				return nil, err
 			}
 
-			dests := []tailcfg.NetPortRange{}
+			var dests []tailcfg.NetPortRange
 			for _, dest := range expanded.Prefixes() {
 				for _, port := range *ports {
 					pr := tailcfg.NetPortRange{
@@ -219,30 +251,29 @@ func ReduceFilterRules(node *types.Node, rules []tailcfg.FilterRule) []tailcfg.F
 
 	for _, rule := range rules {
 		// record if the rule is actually relevant for the given node.
-		dests := []tailcfg.NetPortRange{}
-
+		var dests []tailcfg.NetPortRange
+	DEST_LOOP:
 		for _, dest := range rule.DstPorts {
 			expanded, err := util.ParseIPSet(dest.IP, nil)
 			// Fail closed, if we cant parse it, then we should not allow
 			// access.
 			if err != nil {
-				continue
+				continue DEST_LOOP
 			}
 
 			if node.InIPSet(expanded) {
 				dests = append(dests, dest)
+				continue DEST_LOOP
 			}
 
 			// If the node exposes routes, ensure they are note removed
 			// when the filters are reduced.
 			if node.Hostinfo != nil {
-				// TODO(kradalby): Evaluate if we should only keep
-				// the routes if the route is enabled. This will
-				// require database access in this part of the code.
 				if len(node.Hostinfo.RoutableIPs) > 0 {
 					for _, routableIP := range node.Hostinfo.RoutableIPs {
-						if expanded.ContainsPrefix(routableIP) {
+						if expanded.OverlapsPrefix(routableIP) {
 							dests = append(dests, dest)
+							continue DEST_LOOP
 						}
 					}
 				}
@@ -269,7 +300,7 @@ func (pol *ACLPolicy) CompileSSHPolicy(
 		return nil, nil
 	}
 
-	rules := []*tailcfg.SSHRule{}
+	var rules []*tailcfg.SSHRule
 
 	acceptAction := tailcfg.SSHAction{
 		Message:                  "",
@@ -501,8 +532,7 @@ func (pol *ACLPolicy) expandSource(
 		return []string{}, err
 	}
 
-	prefixes := []string{}
-
+	var prefixes []string
 	for _, prefix := range ipSet.Prefixes() {
 		prefixes = append(prefixes, prefix.String())
 	}
@@ -517,6 +547,7 @@ func (pol *ACLPolicy) expandSource(
 // - a host
 // - an ip
 // - a cidr
+// - an autogroup
 // and transform these in IPAddresses.
 func (pol *ACLPolicy) ExpandAlias(
 	nodes types.Nodes,
@@ -540,6 +571,10 @@ func (pol *ACLPolicy) ExpandAlias(
 	// if alias is a tag
 	if isTag(alias) {
 		return pol.expandIPsFromTag(alias, nodes)
+	}
+
+	if isAutoGroup(alias) {
+		return expandAutoGroup(alias)
 	}
 
 	// if alias is a user
@@ -578,8 +613,8 @@ func excludeCorrectlyTaggedNodes(
 	nodes types.Nodes,
 	user string,
 ) types.Nodes {
-	out := types.Nodes{}
-	tags := []string{}
+	var out types.Nodes
+	var tags []string
 	for tag := range aclPolicy.TagOwners {
 		owners, _ := expandOwnersFromTag(aclPolicy, user)
 		ns := append(owners, user)
@@ -624,7 +659,7 @@ func expandPorts(portsStr string, isWild bool) (*[]tailcfg.PortRange, error) {
 		return nil, ErrWildcardIsNeeded
 	}
 
-	ports := []tailcfg.PortRange{}
+	var ports []tailcfg.PortRange
 	for _, portStr := range strings.Split(portsStr, ",") {
 		log.Trace().Msgf("parsing portstring: %s", portStr)
 		rang := strings.Split(portStr, "-")
@@ -700,7 +735,7 @@ func expandOwnersFromTag(
 func (pol *ACLPolicy) expandUsersFromGroup(
 	group string,
 ) ([]string, error) {
-	users := []string{}
+	var users []string
 	log.Trace().Caller().Interface("pol", pol).Msg("test")
 	aclGroups, ok := pol.Groups[group]
 	if !ok {
@@ -735,7 +770,7 @@ func (pol *ACLPolicy) expandIPsFromGroup(
 	group string,
 	nodes types.Nodes,
 ) (*netipx.IPSet, error) {
-	build := netipx.IPSetBuilder{}
+	var build netipx.IPSetBuilder
 
 	users, err := pol.expandUsersFromGroup(group)
 	if err != nil {
@@ -755,7 +790,7 @@ func (pol *ACLPolicy) expandIPsFromTag(
 	alias string,
 	nodes types.Nodes,
 ) (*netipx.IPSet, error) {
-	build := netipx.IPSetBuilder{}
+	var build netipx.IPSetBuilder
 
 	// check for forced tags
 	for _, node := range nodes {
@@ -804,7 +839,7 @@ func (pol *ACLPolicy) expandIPsFromUser(
 	user string,
 	nodes types.Nodes,
 ) (*netipx.IPSet, error) {
-	build := netipx.IPSetBuilder{}
+	var build netipx.IPSetBuilder
 
 	filteredNodes := filterNodesByUser(nodes, user)
 	filteredNodes = excludeCorrectlyTaggedNodes(pol, filteredNodes, user)
@@ -829,7 +864,7 @@ func (pol *ACLPolicy) expandIPsFromSingleIP(
 
 	matches := nodes.FilterByIP(ip)
 
-	build := netipx.IPSetBuilder{}
+	var build netipx.IPSetBuilder
 	build.Add(ip)
 
 	for _, node := range matches {
@@ -844,7 +879,7 @@ func (pol *ACLPolicy) expandIPsFromIPPrefix(
 	nodes types.Nodes,
 ) (*netipx.IPSet, error) {
 	log.Trace().Str("prefix", prefix.String()).Msg("expandAlias got prefix")
-	build := netipx.IPSetBuilder{}
+	var build netipx.IPSetBuilder
 	build.AddPrefix(prefix)
 
 	// This is suboptimal and quite expensive, but if we only add the prefix, we will miss all the relevant IPv6
@@ -862,6 +897,16 @@ func (pol *ACLPolicy) expandIPsFromIPPrefix(
 	return build.IPSet()
 }
 
+func expandAutoGroup(alias string) (*netipx.IPSet, error) {
+	switch {
+	case strings.HasPrefix(alias, "autogroup:internet"):
+		return theInternet(), nil
+
+	default:
+		return nil, fmt.Errorf("unknown autogroup %q", alias)
+	}
+}
+
 func isWildcard(str string) bool {
 	return str == "*"
 }
@@ -874,14 +919,18 @@ func isTag(str string) bool {
 	return strings.HasPrefix(str, "tag:")
 }
 
+func isAutoGroup(str string) bool {
+	return strings.HasPrefix(str, "autogroup:")
+}
+
 // TagsOfNode will return the tags of the current node.
 // Invalid tags are tags added by a user on a node, and that user doesn't have authority to add this tag.
 // Valid tags are tags added by a user that is allowed in the ACL policy to add this tag.
 func (pol *ACLPolicy) TagsOfNode(
 	node *types.Node,
 ) ([]string, []string) {
-	validTags := make([]string, 0)
-	invalidTags := make([]string, 0)
+	var validTags []string
+	var invalidTags []string
 
 	// TODO(kradalby): Why is this sometimes nil? coming from tailNode?
 	if node == nil {
@@ -922,7 +971,7 @@ func (pol *ACLPolicy) TagsOfNode(
 }
 
 func filterNodesByUser(nodes types.Nodes, user string) types.Nodes {
-	out := types.Nodes{}
+	var out types.Nodes
 	for _, node := range nodes {
 		if node.User.Name == user {
 			out = append(out, node)
@@ -938,7 +987,7 @@ func FilterNodesByACL(
 	nodes types.Nodes,
 	filter []tailcfg.FilterRule,
 ) types.Nodes {
-	result := types.Nodes{}
+	var result types.Nodes
 
 	for index, peer := range nodes {
 		if peer.ID == node.ID {

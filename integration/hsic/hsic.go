@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -201,6 +203,14 @@ func WithEmbeddedDERPServerOnly() Option {
 	}
 }
 
+// WithTuning allows changing the tuning settings easily.
+func WithTuning(batchTimeout time.Duration, mapSessionChanSize int) Option {
+	return func(hsic *HeadscaleInContainer) {
+		hsic.env["HEADSCALE_TUNING_BATCH_CHANGE_DELAY"] = batchTimeout.String()
+		hsic.env["HEADSCALE_TUNING_NODE_MAPSESSION_BUFFERED_CHAN_SIZE"] = strconv.Itoa(mapSessionChanSize)
+	}
+}
+
 // New returns a new HeadscaleInContainer instance.
 func New(
 	pool *dockertest.Pool,
@@ -276,9 +286,13 @@ func New(
 	}
 
 	env := []string{
-		"HEADSCALE_PROFILING_ENABLED=1",
-		"HEADSCALE_PROFILING_PATH=/tmp/profile",
+		"HEADSCALE_DEBUG_PROFILING_ENABLED=1",
+		"HEADSCALE_DEBUG_PROFILING_PATH=/tmp/profile",
 		"HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH=/tmp/mapresponses",
+		"HEADSCALE_DEBUG_DEADLOCK=1",
+		"HEADSCALE_DEBUG_DEADLOCK_TIMEOUT=5s",
+		"HEADSCALE_DEBUG_HIGH_CARDINALITY_METRICS=1",
+		"HEADSCALE_DEBUG_DUMP_CONFIG=1",
 	}
 	for key, value := range hsic.env {
 		env = append(env, fmt.Sprintf("%s=%s", key, value))
@@ -387,6 +401,14 @@ func (t *HeadscaleInContainer) Shutdown() error {
 		)
 	}
 
+	err = t.SaveMetrics(fmt.Sprintf("/tmp/control/%s_metrics.txt", t.hostname))
+	if err != nil {
+		log.Printf(
+			"Failed to metrics from control: %s",
+			err,
+		)
+	}
+
 	// Send a interrupt signal to the "headscale" process inside the container
 	// allowing it to shut down gracefully and flush the profile to disk.
 	// The container will live for a bit longer due to the sleep at the end.
@@ -437,6 +459,25 @@ func (t *HeadscaleInContainer) Shutdown() error {
 // on the host system.
 func (t *HeadscaleInContainer) SaveLog(path string) error {
 	return dockertestutil.SaveLog(t.pool, t.container, path)
+}
+
+func (t *HeadscaleInContainer) SaveMetrics(savePath string) error {
+	resp, err := http.Get(fmt.Sprintf("http://%s:9090/metrics", t.hostname))
+	if err != nil {
+		return fmt.Errorf("getting metrics: %w", err)
+	}
+	defer resp.Body.Close()
+	out, err := os.Create(savePath)
+	if err != nil {
+		return fmt.Errorf("creating file for metrics: %w", err)
+	}
+	defer out.Close()
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return fmt.Errorf("copy response to file: %w", err)
+	}
+
+	return nil
 }
 
 func (t *HeadscaleInContainer) SaveProfile(savePath string) error {
@@ -710,7 +751,7 @@ func createCertificate(hostname string) ([]byte, []byte, error) {
 			Locality:     []string{"Leiden"},
 		},
 		NotBefore: time.Now(),
-		NotAfter:  time.Now().Add(60 * time.Minute),
+		NotAfter:  time.Now().Add(60 * time.Hour),
 		IsCA:      true,
 		ExtKeyUsage: []x509.ExtKeyUsage{
 			x509.ExtKeyUsageClientAuth,

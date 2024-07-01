@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/netip"
@@ -15,6 +16,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/sync/errgroup"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/types/key"
 )
@@ -23,7 +25,7 @@ func TestPingAllByIP(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -67,7 +69,7 @@ func TestPingAllByIPPublicDERP(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -105,7 +107,7 @@ func TestAuthKeyLogoutAndRelogin(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -216,7 +218,7 @@ func TestEphemeral(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -299,7 +301,7 @@ func TestPingAllByHostname(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -335,20 +337,20 @@ func TestTaildrop(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	retry := func(times int, sleepInverval time.Duration, doWork func() error) error {
+	retry := func(times int, sleepInterval time.Duration, doWork func() error) error {
 		var err error
 		for attempts := 0; attempts < times; attempts++ {
 			err = doWork()
 			if err == nil {
 				return nil
 			}
-			time.Sleep(sleepInverval)
+			time.Sleep(sleepInterval)
 		}
 
 		return err
 	}
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -509,7 +511,7 @@ func TestResolveMagicDNS(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -577,7 +579,7 @@ func TestExpireNode(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -703,7 +705,7 @@ func TestNodeOnlineStatus(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -793,7 +795,7 @@ func TestNodeOnlineStatus(t *testing.T) {
 					continue
 				}
 
-				// All peers of this nodess are reporting to be
+				// All peers of this nodes are reporting to be
 				// connected to the control server
 				assert.Truef(
 					t,
@@ -818,7 +820,7 @@ func TestPingAllByIPManyUpDown(t *testing.T) {
 	IntegrationSkip(t)
 	t.Parallel()
 
-	scenario, err := NewScenario()
+	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
 	defer scenario.Shutdown()
 
@@ -829,24 +831,10 @@ func TestPingAllByIPManyUpDown(t *testing.T) {
 		"user2": len(MustTestVersions),
 	}
 
-	headscaleConfig := map[string]string{
-		"HEADSCALE_DERP_URLS":                    "",
-		"HEADSCALE_DERP_SERVER_ENABLED":          "true",
-		"HEADSCALE_DERP_SERVER_REGION_ID":        "999",
-		"HEADSCALE_DERP_SERVER_REGION_CODE":      "headscale",
-		"HEADSCALE_DERP_SERVER_REGION_NAME":      "Headscale Embedded DERP",
-		"HEADSCALE_DERP_SERVER_STUN_LISTEN_ADDR": "0.0.0.0:3478",
-		"HEADSCALE_DERP_SERVER_PRIVATE_KEY_PATH": "/tmp/derp.key",
-
-		// Envknob for enabling DERP debug logs
-		"DERP_DEBUG_LOGS":        "true",
-		"DERP_PROBER_DEBUG_LOGS": "true",
-	}
-
 	err = scenario.CreateHeadscaleEnv(spec,
 		[]tsic.Option{},
-		hsic.WithTestName("pingallbyip"),
-		hsic.WithConfigEnv(headscaleConfig),
+		hsic.WithTestName("pingallbyipmany"),
+		hsic.WithEmbeddedDERPServerOnly(),
 		hsic.WithTLS(),
 		hsic.WithHostnameAsServerURL(),
 	)
@@ -870,19 +858,35 @@ func TestPingAllByIPManyUpDown(t *testing.T) {
 	success := pingAllHelper(t, allClients, allAddrs)
 	t.Logf("%d successful pings out of %d", success, len(allClients)*len(allIps))
 
+	wg, _ := errgroup.WithContext(context.Background())
+
 	for run := range 3 {
 		t.Logf("Starting DownUpPing run %d", run+1)
 
 		for _, client := range allClients {
-			t.Logf("taking down %q", client.Hostname())
-			client.Down()
+			c := client
+			wg.Go(func() error {
+				t.Logf("taking down %q", c.Hostname())
+				return c.Down()
+			})
+		}
+
+		if err := wg.Wait(); err != nil {
+			t.Fatalf("failed to take down all nodes: %s", err)
 		}
 
 		time.Sleep(5 * time.Second)
 
 		for _, client := range allClients {
-			t.Logf("bringing up %q", client.Hostname())
-			client.Up()
+			c := client
+			wg.Go(func() error {
+				t.Logf("bringing up %q", c.Hostname())
+				return c.Up()
+			})
+		}
+
+		if err := wg.Wait(); err != nil {
+			t.Fatalf("failed to take down all nodes: %s", err)
 		}
 
 		time.Sleep(5 * time.Second)

@@ -15,6 +15,10 @@ The reverse proxy MUST be configured to support WebSockets, as it is needed for 
 
 WebSockets support is required when using the headscale embedded DERP server. In this case, you will also need to expose the UDP port used for STUN (by default, udp/3478). Please check our [config-example.yaml](https://github.com/juanfont/headscale/blob/main/config-example.yaml).
 
+### Cloudflare
+
+Running headscale behind a cloudflare proxy or cloudflare tunnel is not supported and will not work as Cloudflare does not support WebSocket POSTs as required by the Tailscale protocol. See [this issue](https://github.com/juanfont/headscale/issues/1468)
+
 ### TLS
 
 Headscale can be configured not to use TLS, leaving it to the reverse proxy to handle. Add the following configuration values to your headscale config file.
@@ -115,7 +119,7 @@ The following Caddyfile is all that is necessary to use Caddy as a reverse proxy
 }
 ```
 
-Caddy v2 will [automatically](https://caddyserver.com/docs/automatic-https) provision a certficate for your domain/subdomain, force HTTPS, and proxy websockets - no further configuration is necessary.
+Caddy v2 will [automatically](https://caddyserver.com/docs/automatic-https) provision a certificate for your domain/subdomain, force HTTPS, and proxy websockets - no further configuration is necessary.
 
 For a slightly more complex configuration which utilizes Docker containers to manage Caddy, Headscale, and Headscale-UI, [Guru Computing's guide](https://blog.gurucomputing.com.au/smart-vpns-with-headscale/) is an excellent reference.
 

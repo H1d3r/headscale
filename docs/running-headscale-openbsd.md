@@ -9,19 +9,17 @@
 
 ## Goal
 
-This documentation has the goal of showing a user how-to install and run `headscale` on OpenBSD 7.1.
+This documentation has the goal of showing a user how-to install and run `headscale` on OpenBSD.
 In additional to the "get up and running section", there is an optional [rc.d section](#running-headscale-in-the-background-with-rcd)
 describing how to make `headscale` run properly in a server environment.
 
 ## Install `headscale`
 
-1. Install from ports (not recommended)
+1. Install from ports
 
-    !!! info
+    You can install headscale from ports by running `pkg_add headscale`.
 
-        As of OpenBSD 7.2, there's a headscale in ports collection, however, it's severely outdated(v0.12.4). You can install it via `pkg_add headscale`.
-
-1. Install from source on OpenBSD 7.2
+1. Install from source
 
     ```shell
     # Install prerequistes
@@ -32,7 +30,7 @@ describing how to make `headscale` run properly in a server environment.
     cd headscale
 
     # optionally checkout a release
-    # option a. you can find offical relase at https://github.com/juanfont/headscale/releases/latest
+    # option a. you can find official release at https://github.com/juanfont/headscale/releases/latest
     # option b. get latest tag, this may be a beta release
     latestTag=$(git describe --tags `git rev-list --tags --max-count=1`)
 
@@ -59,7 +57,7 @@ describing how to make `headscale` run properly in a server environment.
     cd headscale
 
     # optionally checkout a release
-    # option a. you can find offical relase at https://github.com/juanfont/headscale/releases/latest
+    # option a. you can find official release at https://github.com/juanfont/headscale/releases/latest
     # option b. get latest tag, this may be a beta release
     latestTag=$(git describe --tags `git rev-list --tags --max-count=1`)
 
@@ -95,7 +93,7 @@ describing how to make `headscale` run properly in a server environment.
     touch /etc/headscale/config.yaml
     ```
 
-**(Strongly Recommended)** Download a copy of the [example configuration][config-example.yaml](https://github.com/juanfont/headscale/blob/main/config-example.yaml) from the headscale repository.
+**(Strongly Recommended)** Download a copy of the [example configuration](https://github.com/juanfont/headscale/blob/main/config-example.yaml) from the headscale repository.
 
 1. Start the headscale server:
 
